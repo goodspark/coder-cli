@@ -9,7 +9,7 @@ import (
 // OSer wraps methods in package "os" and friends to allow for ease of testing
 type OSer interface {
 	// OpenFile does the same thing as os.OpenFile
-	OpenFile(name string, flag int, perm fs.FileMode) (ReadWriteCloserAt, error)
+	OpenFile(name string, flag int, perm fs.FileMode) (*os.File, error)
 	// Executable does the same thing as os.Executable
 	Executable() (string, error)
 	// Stat does the same thing as os.Stat()
@@ -34,7 +34,7 @@ func (d *DefaultOS) Executable() (string, error) {
 	return os.Executable()
 }
 
-func (d *DefaultOS) OpenFile(name string, flag int, perm fs.FileMode) (ReadWriteCloserAt, error) {
+func (d *DefaultOS) OpenFile(name string, flag int, perm fs.FileMode) (*os.File, error) {
 	return os.OpenFile(name, flag, perm)
 }
 
