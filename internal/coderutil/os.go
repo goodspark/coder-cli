@@ -1,69 +1,65 @@
 package coderutil
 
 import (
+	"io"
+	"io/fs"
 	"os"
-	"os/exec"
 )
 
 // OSer wraps methods in package "os" and friends to allow for ease of testing
 type OSer interface {
 	// Create does the same thing as os.Create
-	Create(path string) (*os.File, error)
-	// ExecCommand runs exec.Command(name, args...) and returns its CombinedOutput.
-	ExecCommand(name string, args ...string) ([]byte, error)
+	Create(path string) (ReadWriteCloserAt, error)
 	// Executable does the same thing as os.Executable
 	Executable() (string, error)
-	// Stat does the same thing as os.Stat
-	Stat(path string) (os.FileInfo, error)
+	// Stat does the same thing as os.Stat()
+	Stat(path string) (fs.FileInfo, error)
 	// RemoveAll does the same thing as os.RemoveAll
 	RemoveAll(path string) error
 	// Rename does the same thing as os.Rename
 	Rename(src, dest string) error
+	// TempDir does the same as os.Tempdir
+	TempDir() string
 }
 
-// OS implements OSer
-type OS struct {
-	CreateF      func(string) (*os.File, error)
-	ExecCommandF func(string, ...string) *exec.Cmd
-	ExecutableF  func() (string, error)
-	StatF        func(string) (os.FileInfo, error)
-	RemoveAllF   func(string) error
-	RenameF      func(string, string) error
+type DefaultOS struct{}
+
+var _ OSer = &DefaultOS{}
+
+func NewDefaultOS() *DefaultOS {
+	return &DefaultOS{}
 }
 
-var _ OSer = &OS{}
-
-func RealOS() OSer {
-	return &OS{
-		CreateF:      os.Create,
-		ExecCommandF: exec.Command,
-		ExecutableF:  os.Executable,
-		StatF:        os.Stat,
-		RemoveAllF:   os.RemoveAll,
-		RenameF:      os.Rename,
-	}
+func (d *DefaultOS) Create(name string) (ReadWriteCloserAt, error) {
+	// TODO: use fs.Create when it becomes available (hopefully)
+	return os.Create(name)
 }
 
-func (o *OS) Create(path string) (*os.File, error) {
-	return o.CreateF(path)
+func (d *DefaultOS) Executable() (string, error) {
+	return os.Executable()
 }
 
-func (o *OS) ExecCommand(name string, args ...string) ([]byte, error) {
-	return o.ExecCommandF(name, args...).CombinedOutput()
+func (d *DefaultOS) Stat(name string) (fs.FileInfo, error) {
+	return os.Stat(name)
 }
 
-func (o *OS) Executable() (string, error) {
-	return o.ExecutableF()
+func (d *DefaultOS) RemoveAll(path string) error {
+	// TODO: use fs.RemoveAll when it becomes available (hopefully)
+	return os.RemoveAll(path)
 }
 
-func (o *OS) Stat(name string) (os.FileInfo, error) {
-	return o.StatF(name)
+func (d *DefaultOS) Rename(src, dest string) error {
+	// TODO: use fs.Rename when it becomes available (hopefully)
+	return os.Rename(src, dest)
 }
 
-func (o *OS) RemoveAll(path string) error {
-	return o.RemoveAllF(path)
+func (d *DefaultOS) TempDir() string {
+	return os.TempDir()
 }
 
-func (o *OS) Rename(oldpath, newpath string) error {
-	return o.RenameF(oldpath, newpath)
+// ReadWriteCloserAt is a ReadWriteCloser that also implements ReaderAt.
+// Just like *os.File.
+type ReadWriteCloserAt interface {
+	io.ReadWriteCloser
+	io.ReaderAt
 }

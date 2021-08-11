@@ -3,12 +3,12 @@ package cmd
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
-	"os"
+	"net/url"
 	"path"
 	"runtime"
 	"time"
@@ -27,18 +27,6 @@ import (
 //   * homebrew prefix
 //   * coder assets root (env CODER_ASSETS_ROOT)
 
-func makeDownloadURL(version, ostype, archtype string) string {
-	const template = "https://github.com/cdr/coder-cli/releases/download/v%s/coder-cli-%s-%s.%s"
-	var ext string
-	switch ostype {
-	case "linux":
-		ext = "tar.gz"
-	default:
-		ext = ".zip"
-	}
-	return fmt.Sprintf(template, version, ostype, archtype, ext)
-}
-
 func updateCmd() *cobra.Command {
 	var (
 		force      bool
@@ -56,8 +44,12 @@ func updateCmd() *cobra.Command {
 				return clog.Fatal("could not init coder client", clog.Causef(err.Error()))
 			}
 			updater := &updater{
-				client: client,
-				os:     coderutil.RealOS(),
+				httpClient: &http.Client{
+					Timeout: 10 * time.Second,
+				},
+				coderClient: client,
+				os:          coderutil.NewDefaultOS(),
+				confirm:     defaultConfirm,
 			}
 			return updater.Run(ctx, force, versionArg)
 		},
@@ -69,9 +61,25 @@ func updateCmd() *cobra.Command {
 	return cmd
 }
 
+// updaterClient specifies the methods of coder.Client used by updater
+type updaterClient interface {
+	APIVersion(context.Context) (string, error)
+	BaseURL() url.URL
+}
+
+// ensure that we have the methods we need
+var _ updaterClient = &coder.DefaultClient{}
+
+// updater updates coder-cli
 type updater struct {
-	client coder.Client
-	os     coderutil.OSer
+	httpClient  getter
+	coderClient updaterClient
+	os          coderutil.OSer
+	confirm     func(label string) (string, error)
+}
+
+type getter interface {
+	Get(url string) (*http.Response, error)
 }
 
 func (u *updater) Run(ctx context.Context, force bool, versionArg string) error {
@@ -89,29 +97,17 @@ func (u *updater) Run(ctx context.Context, force bool, versionArg string) error 
 		return clog.Fatal("preflight: missing write permission on current binary")
 	}
 
-	brewPrefixCmdOutput, err := u.os.ExecCommand("brew", "--prefix")
-	if err != nil {
-		clog.LogWarn("brew --prefix returned error", clog.Causef(err.Error()))
-	} else {
-		clog.LogInfo("brew --prefix returned output", string(brewPrefixCmdOutput))
-	}
-
-	client, err := newClient(ctx, false)
-	if err != nil {
-		return clog.Fatal("init http client", clog.Causef("%s", err))
-	}
-
 	var version semver.Version
 	if versionArg == "" {
-		apiVersion, err := client.APIVersion(ctx)
+		apiVersion, err := u.coderClient.APIVersion(ctx)
 		if err != nil {
-			return clog.Fatal("fetch api version", clog.Causef("%s", err))
+			return clog.Fatal("fetch api version", clog.Causef(err.Error()))
 		}
 		version, err = semver.Make(apiVersion)
 		if err != nil {
 			return clog.Fatal("coder reported invalid version", clog.Causef(err.Error()))
 		}
-		clog.LogInfo(fmt.Sprintf("Coder instance at %q reports version %s", client.BaseURL().Host, version.FinalizeVersion()))
+		clog.LogInfo(fmt.Sprintf("Coder instance at %q reports version %s", u.coderClient.BaseURL().Host, version.FinalizeVersion()))
 	} else {
 		version, err = semver.Make(versionArg)
 		if err != nil {
@@ -120,45 +116,21 @@ func (u *updater) Run(ctx context.Context, force bool, versionArg string) error 
 	}
 
 	if !force {
-		confirm := promptui.Prompt{
-			IsConfirm: true,
-			Label:     fmt.Sprintf("Update coder-cli to version %s?", version.FinalizeVersion()),
-		}
-		if _, err := confirm.Run(); err != nil {
+		label := fmt.Sprintf("Update coder-cli to version %s?", version.FinalizeVersion())
+		if _, err := u.confirm(label); err != nil {
 			return clog.Fatal("failed to confirm update", clog.Tipf(`use "--force" to update without confirmation`))
 		}
 	}
 
-	tempDir, err := ioutil.TempDir("", "coder-cli-update")
-	if err != nil {
-		return clog.Fatal("failed to create temp dir", clog.Causef("%s", err))
-	}
-
-	defer func() {
-		_ = os.RemoveAll(tempDir)
-	}()
-
 	downloadURL := makeDownloadURL(version.FinalizeVersion(), runtime.GOOS, runtime.GOARCH)
-	downloadFilename := path.Base(downloadURL)
-	downloadFilepath := path.Join(tempDir, downloadFilename)
-	downloadFile, err := os.Create(downloadFilepath)
-	if err != nil {
-		return clog.Fatal(fmt.Sprintf("failed to create file: %s", downloadFilepath), clog.Causef("%s", err))
-	}
-	defer func() {
-		_ = downloadFile.Close()
-	}()
 
-	bw := bufio.NewWriter(downloadFile)
-
-	httpClient := &http.Client{
-		Timeout: 10 * time.Second,
-	}
+	var downloadBuf bytes.Buffer
+	memWriter := bufio.NewWriter(&downloadBuf)
 
 	clog.LogInfo("fetching coder-cli from GitHub releases", downloadURL)
-	resp, err := httpClient.Get(downloadURL)
+	resp, err := u.httpClient.Get(downloadURL)
 	if err != nil {
-		return clog.Fatal(fmt.Sprintf("failed to fetch URL %s", downloadURL), clog.Causef("%s", err))
+		return clog.Fatal(fmt.Sprintf("failed to fetch URL %s", downloadURL), clog.Causef(err.Error()))
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -169,53 +141,122 @@ func (u *updater) Run(ctx context.Context, force bool, versionArg string) error 
 		resp.Body.Close()
 	}()
 
-	if _, err := io.Copy(bw, resp.Body); err != nil {
-		return clog.Fatal(fmt.Sprintf("failed while downloading %s to %s", downloadURL, downloadFilepath), clog.Causef("%s", err))
+	if _, err := io.Copy(memWriter, resp.Body); err != nil {
+		return clog.Fatal(fmt.Sprintf("failed to download %s", downloadURL), clog.Causef(err.Error()))
+	}
+
+	if err := memWriter.Flush(); err != nil {
+		return clog.Fatal(fmt.Sprintf("failed to save %s", downloadURL), clog.Causef(err.Error()))
 	}
 
 	// TODO: validate the checksum of the downloaded file. GitHub does not currently provide this information
 	// and we do not generate them yet.
+	// zipReader, err := zip.NewReader(bytes.NewReader(downloadBuf.Bytes()), n)
+	// if err != nil {
+	// 	return clog.Fatal("failed to open zip archive", clog.Causef(err.Error()))
+	// }
 
-	zipReader, err := zip.OpenReader(downloadFilepath)
+	// var zf *zip.File
+	// for _, f := range zipReader.File {
+	// 	if f.Name == "coder" {
+	// 		zf = f
+	// 		break
+	// 	}
+	// }
+	// if zf == nil {
+	// 	return xerrors.Errorf("could not find coder binary in downloaded zip archive")
+	// }
+
+	// zipReadCloser, err := zf.Open()
+	// if err != nil {
+	// 	return clog.Fatal("failed to extract updated coder binary from archive", clog.Causef(err.Error()))
+	// }
+	// defer zipReadCloser.Close()
+	updatedBinary, err := extractFromArchive("coder", downloadBuf.Bytes())
 	if err != nil {
-		return clog.Fatal(fmt.Sprintf("failed to open zip archive %s", downloadFilepath), clog.Causef("%s", err))
+		return clog.Fatal("failed to extract coder binary from archive", clog.Causef(err.Error()))
 	}
 
-	// We assume the binary is named coder
-	updatedBinPath := path.Join(tempDir, "coder")
-	var updatedBinZipFile *zip.File
-	for _, f := range zipReader.File {
-		if f.Name == "coder" {
-			updatedBinZipFile = f
-			break
-		}
-	}
-	if updatedBinZipFile == nil {
-		return xerrors.Errorf("could not find coder binary in downloaded zip archive")
-	}
-
-	rc, err := updatedBinZipFile.Open()
+	// We assume the binary is named coder and write it to $TEMPDIR/coder
+	updatedCoderBinaryPath := path.Join(u.os.TempDir(), "coder")
+	updatedBin, err := u.os.Create(updatedCoderBinaryPath)
 	if err != nil {
-		return clog.Fatal("failed to extract updated coder binary from archive", clog.Causef("%s", err))
-	}
-	defer rc.Close()
-
-	updatedBin, err := os.Create(updatedBinPath)
-	if err != nil {
-		return err
+		return clog.Fatal("failed to create file for updated coder binary", clog.Causef(err.Error()))
 	}
 
-	bw2 := bufio.NewWriter(updatedBin)
-	lr := io.LimitReader(rc, 100*1024*1024)
-
-	if _, err := io.Copy(bw2, lr); err != nil {
-		return err
+	fsWriter := bufio.NewWriter(updatedBin)
+	if _, err := io.Copy(fsWriter, bytes.NewReader(updatedBinary)); err != nil {
+		return clog.Fatal("failed to write updated coder binary to disk", clog.Causef(err.Error()))
 	}
 
-	if err = os.Rename(updatedBinPath, currentBinaryPath); err != nil {
-		return err
+	if err = u.os.Rename(updatedCoderBinaryPath, currentBinaryPath); err != nil {
+		return clog.Fatal("failed to update coder binary in-place", clog.Causef(err.Error()))
 	}
 
 	clog.LogSuccess("Updated coder CLI to version " + version.FinalizeVersion())
 	return nil
+}
+
+func defaultConfirm(label string) (string, error) {
+	p := promptui.Prompt{IsConfirm: true, Label: label}
+	return p.Run()
+}
+
+func makeDownloadURL(version, ostype, archtype string) string {
+	const template = "https://github.com/cdr/coder-cli/releases/download/v%s/coder-cli-%s-%s.%s"
+	var ext string
+	switch ostype {
+	case "linux":
+		ext = "tar.gz"
+	default:
+		ext = ".zip"
+	}
+	return fmt.Sprintf(template, version, ostype, archtype, ext)
+}
+
+func extractFromArchive(path string, archive []byte) ([]byte, error) {
+	contentType := http.DetectContentType(archive)
+	switch contentType {
+	case "application/zip":
+		return extractFromZipArchive(path, archive)
+	case "application/x-gzip":
+		return extractFromTGZArchive(path, archive)
+	default:
+		return nil, xerrors.Errorf("unknown archive type: %s", contentType)
+	}
+}
+
+func extractFromZipArchive(path string, archive []byte) ([]byte, error) {
+	zipReader, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
+	if err != nil {
+		return nil, xerrors.Errorf("failed to open zip archive")
+	}
+
+	var zf *zip.File
+	for _, f := range zipReader.File {
+		if f.Name == path {
+			zf = f
+			break
+		}
+	}
+	if zf == nil {
+		return nil, xerrors.Errorf("could not find path %q in zip archive", path)
+	}
+
+	zipReadCloser, err := zf.Open()
+	if err != nil {
+		return nil, xerrors.Errorf("failed to extract path %q from archive", path)
+	}
+	defer zipReadCloser.Close()
+
+	var b bytes.Buffer
+	bw := bufio.NewWriter(&b)
+	if _, err := io.Copy(bw, zipReadCloser); err != nil {
+		return nil, xerrors.Errorf("failed to copy path %q to from archive", path)
+	}
+	return b.Bytes(), nil
+}
+
+func extractFromTGZArchive(path string, archive []byte) ([]byte, error) {
+	return nil, nil
 }
