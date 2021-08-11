@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cdr.dev/coder-cli/coder-sdk"
+	"cdr.dev/coder-cli/internal/version"
 	"cdr.dev/coder-cli/pkg/clog"
 	"golang.org/x/xerrors"
 
@@ -100,32 +101,42 @@ func (u *updater) Run(ctx context.Context, force bool, versionArg string) error 
 		return clog.Fatal("preflight: missing write permission on current binary")
 	}
 
-	var version semver.Version
+	apiVersion, err := u.coderClient.APIVersion(ctx)
+	if err != nil {
+		return clog.Fatal("fetch api version", clog.Causef(err.Error()))
+	}
+
+	var desiredVersion semver.Version
 	if versionArg == "" {
-		apiVersion, err := u.coderClient.APIVersion(ctx)
-		if err != nil {
-			return clog.Fatal("fetch api version", clog.Causef(err.Error()))
-		}
-		version, err = semver.Make(apiVersion)
+		desiredVersion, err = semver.Make(apiVersion)
 		if err != nil {
 			return clog.Fatal("coder reported invalid version", clog.Causef(err.Error()))
 		}
-		clog.LogInfo(fmt.Sprintf("Coder instance at %q reports version %s", u.coderClient.BaseURL().Host, version.FinalizeVersion()))
+		clog.LogInfo(fmt.Sprintf("Coder instance at %q reports version %s", u.coderClient.BaseURL().Host, desiredVersion.FinalizeVersion()))
 	} else {
-		version, err = semver.Make(versionArg)
+		desiredVersion, err = semver.Make(versionArg)
 		if err != nil {
 			return clog.Fatal("invalid version argument provided", clog.Causef(err.Error()))
 		}
 	}
 
+	if currentVersion, err := semver.Make(version.Version); err == nil {
+		if desiredVersion.Compare(currentVersion) == 0 {
+			clog.LogInfo("Up to date!")
+			return nil
+		}
+	} else {
+		clog.LogWarn("Unable to determine current version", clog.Causef(err.Error()))
+	}
+
 	if !force {
-		label := fmt.Sprintf("Update coder-cli to version %s?", version.FinalizeVersion())
+		label := fmt.Sprintf("Update coder-cli to version %s?", desiredVersion.FinalizeVersion())
 		if _, err := u.confirm(label); err != nil {
 			return clog.Fatal("failed to confirm update", clog.Tipf(`use "--force" to update without confirmation`))
 		}
 	}
 
-	downloadURL := makeDownloadURL(version.FinalizeVersion(), runtime.GOOS, runtime.GOARCH)
+	downloadURL := makeDownloadURL(desiredVersion.FinalizeVersion(), runtime.GOOS, runtime.GOARCH)
 
 	var downloadBuf bytes.Buffer
 	memWriter := bufio.NewWriter(&downloadBuf)
@@ -173,7 +184,7 @@ func (u *updater) Run(ctx context.Context, force bool, versionArg string) error 
 		return clog.Fatal("failed to update coder binary in-place", clog.Causef(err.Error()))
 	}
 
-	clog.LogSuccess("Updated coder CLI to version " + version.FinalizeVersion())
+	clog.LogSuccess("Updated coder CLI to version " + desiredVersion.FinalizeVersion())
 	return nil
 }
 
