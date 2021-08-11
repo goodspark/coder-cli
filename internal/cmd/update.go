@@ -8,10 +8,12 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"path"
 	"runtime"
 	"time"
 
+	"cdr.dev/coder-cli/coder-sdk"
 	"cdr.dev/coder-cli/internal/coderutil"
 	"cdr.dev/coder-cli/pkg/clog"
 	"golang.org/x/xerrors"
@@ -48,7 +50,16 @@ func updateCmd() *cobra.Command {
 		Short: "Update coder binary",
 		Long:  "Update coder to the latest version, or to the correct version matching current login.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return doUpdate(cmd.Context(), force, versionArg, coderutil.RealOS())
+			ctx := cmd.Context()
+			client, err := newClient(ctx, false)
+			if err != nil {
+				return clog.Fatal("could not init coder client", clog.Causef(err.Error()))
+			}
+			updater := &updater{
+				client: client,
+				os:     coderutil.RealOS(),
+			}
+			return updater.Run(ctx, force, versionArg)
 		},
 	}
 
@@ -58,13 +69,18 @@ func updateCmd() *cobra.Command {
 	return cmd
 }
 
-func doUpdate(ctx context.Context, force bool, versionArg string, os coderutil.OSer) error {
-	currentBinaryPath, err := os.Executable()
+type updater struct {
+	client coder.Client
+	os     coderutil.OSer
+}
+
+func (u *updater) Run(ctx context.Context, force bool, versionArg string) error {
+	currentBinaryPath, err := u.os.Executable()
 	if err != nil {
 		return clog.Fatal("preflight: failed to get path of current binary", clog.Causef("%s", err))
 	}
 
-	currentBinaryStat, err := os.Stat(currentBinaryPath)
+	currentBinaryStat, err := u.os.Stat(currentBinaryPath)
 	if err != nil {
 		return clog.Fatal("preflight: cannot stat current binary", clog.Causef("%s", err))
 	}
@@ -73,7 +89,7 @@ func doUpdate(ctx context.Context, force bool, versionArg string, os coderutil.O
 		return clog.Fatal("preflight: missing write permission on current binary")
 	}
 
-	brewPrefixCmdOutput, err := os.ExecCommand("brew", "--prefix")
+	brewPrefixCmdOutput, err := u.os.ExecCommand("brew", "--prefix")
 	if err != nil {
 		clog.LogWarn("brew --prefix returned error", clog.Causef(err.Error()))
 	} else {
@@ -109,7 +125,7 @@ func doUpdate(ctx context.Context, force bool, versionArg string, os coderutil.O
 			Label:     fmt.Sprintf("Update coder-cli to version %s?", version.FinalizeVersion()),
 		}
 		if _, err := confirm.Run(); err != nil {
-			return clog.Fatal("failed to confirm update", clog.BlankLine, clog.Tipf(`use "--force" to update without confirmation`))
+			return clog.Fatal("failed to confirm update", clog.Tipf(`use "--force" to update without confirmation`))
 		}
 	}
 
