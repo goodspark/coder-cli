@@ -16,18 +16,25 @@ import (
 	"time"
 
 	"cdr.dev/coder-cli/coder-sdk"
-	"cdr.dev/coder-cli/internal/coderutil"
 	"cdr.dev/coder-cli/pkg/clog"
 	"golang.org/x/xerrors"
 
 	"github.com/blang/semver/v4"
+	"github.com/blang/vfs"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 )
 
-// TODO: check under following directories and warn if coder binary is under them:
-//   * homebrew prefix
-//   * coder assets root (env CODER_ASSETS_ROOT)
+// updater updates coder-cli
+type updater struct {
+	httpClient  getter
+	coderClient updaterClient
+	// os             coderutil.OSer
+	fs             vfs.Filesystem
+	confirm        func(label string) (string, error)
+	tempdir        string
+	executablePath string
+}
 
 func updateCmd() *cobra.Command {
 	var (
@@ -45,13 +52,16 @@ func updateCmd() *cobra.Command {
 			if err != nil {
 				return clog.Fatal("could not init coder client", clog.Causef(err.Error()))
 			}
+
 			updater := &updater{
 				httpClient: &http.Client{
 					Timeout: 10 * time.Second,
 				},
-				coderClient: client,
-				os:          coderutil.NewDefaultOS(),
-				confirm:     defaultConfirm,
+				coderClient:    client,
+				fs:             vfs.OS(),
+				confirm:        defaultConfirm,
+				tempdir:        os.TempDir(),
+				executablePath: os.Args[0],
 			}
 			return updater.Run(ctx, force, versionArg)
 		},
@@ -72,25 +82,16 @@ type updaterClient interface {
 // ensure that we have the methods we need
 var _ updaterClient = &coder.DefaultClient{}
 
-// updater updates coder-cli
-type updater struct {
-	httpClient  getter
-	coderClient updaterClient
-	os          coderutil.OSer
-	confirm     func(label string) (string, error)
-}
-
 type getter interface {
 	Get(url string) (*http.Response, error)
 }
 
 func (u *updater) Run(ctx context.Context, force bool, versionArg string) error {
-	currentBinaryPath, err := u.os.Executable()
-	if err != nil {
-		return clog.Fatal("preflight: failed to get path of current binary", clog.Causef("%s", err))
-	}
+	// TODO: check under following directories and warn if coder binary is under them:
+	//   * homebrew prefix
+	//   * coder assets root (env CODER_ASSETS_ROOT)
 
-	currentBinaryStat, err := u.os.Stat(currentBinaryPath)
+	currentBinaryStat, err := u.fs.Stat(u.executablePath)
 	if err != nil {
 		return clog.Fatal("preflight: cannot stat current binary", clog.Causef("%s", err))
 	}
@@ -139,13 +140,11 @@ func (u *updater) Run(ctx context.Context, force bool, versionArg string) error 
 		return clog.Fatal("failed to fetch release", clog.Causef("URL %s returned status code %d", downloadURL, resp.StatusCode))
 	}
 
-	defer func() {
-		resp.Body.Close()
-	}()
-
 	if _, err := io.Copy(memWriter, resp.Body); err != nil {
 		return clog.Fatal(fmt.Sprintf("failed to download %s", downloadURL), clog.Causef(err.Error()))
 	}
+
+	_ = resp.Body.Close()
 
 	if err := memWriter.Flush(); err != nil {
 		return clog.Fatal(fmt.Sprintf("failed to save %s", downloadURL), clog.Causef(err.Error()))
@@ -159,8 +158,8 @@ func (u *updater) Run(ctx context.Context, force bool, versionArg string) error 
 	}
 
 	// We assume the binary is named coder and write it to coder.new
-	updatedCoderBinaryPath := currentBinaryPath + ".new"
-	updatedBin, err := u.os.OpenFile(updatedCoderBinaryPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, currentBinaryStat.Mode().Perm())
+	updatedCoderBinaryPath := u.executablePath + ".new"
+	updatedBin, err := u.fs.OpenFile(updatedCoderBinaryPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, currentBinaryStat.Mode().Perm())
 	if err != nil {
 		return clog.Fatal("failed to create file for updated coder binary", clog.Causef(err.Error()))
 	}
@@ -170,7 +169,7 @@ func (u *updater) Run(ctx context.Context, force bool, versionArg string) error 
 		return clog.Fatal("failed to write updated coder binary to disk", clog.Causef(err.Error()))
 	}
 
-	if err = u.os.Rename(updatedCoderBinaryPath, currentBinaryPath); err != nil {
+	if err = u.fs.Rename(updatedCoderBinaryPath, u.executablePath); err != nil {
 		return clog.Fatal("failed to update coder binary in-place", clog.Causef(err.Error()))
 	}
 
