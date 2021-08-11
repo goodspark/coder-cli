@@ -1,15 +1,17 @@
 package cmd
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"path"
+	"os"
 	"runtime"
 	"time"
 
@@ -151,35 +153,14 @@ func (u *updater) Run(ctx context.Context, force bool, versionArg string) error 
 
 	// TODO: validate the checksum of the downloaded file. GitHub does not currently provide this information
 	// and we do not generate them yet.
-	// zipReader, err := zip.NewReader(bytes.NewReader(downloadBuf.Bytes()), n)
-	// if err != nil {
-	// 	return clog.Fatal("failed to open zip archive", clog.Causef(err.Error()))
-	// }
-
-	// var zf *zip.File
-	// for _, f := range zipReader.File {
-	// 	if f.Name == "coder" {
-	// 		zf = f
-	// 		break
-	// 	}
-	// }
-	// if zf == nil {
-	// 	return xerrors.Errorf("could not find coder binary in downloaded zip archive")
-	// }
-
-	// zipReadCloser, err := zf.Open()
-	// if err != nil {
-	// 	return clog.Fatal("failed to extract updated coder binary from archive", clog.Causef(err.Error()))
-	// }
-	// defer zipReadCloser.Close()
 	updatedBinary, err := extractFromArchive("coder", downloadBuf.Bytes())
 	if err != nil {
 		return clog.Fatal("failed to extract coder binary from archive", clog.Causef(err.Error()))
 	}
 
-	// We assume the binary is named coder and write it to $TEMPDIR/coder
-	updatedCoderBinaryPath := path.Join(u.os.TempDir(), "coder")
-	updatedBin, err := u.os.Create(updatedCoderBinaryPath)
+	// We assume the binary is named coder and write it to coder.new
+	updatedCoderBinaryPath := currentBinaryPath + ".new"
+	updatedBin, err := u.os.OpenFile(updatedCoderBinaryPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, currentBinaryStat.Mode().Perm())
 	if err != nil {
 		return clog.Fatal("failed to create file for updated coder binary", clog.Causef(err.Error()))
 	}
@@ -243,20 +224,45 @@ func extractFromZipArchive(path string, archive []byte) ([]byte, error) {
 		return nil, xerrors.Errorf("could not find path %q in zip archive", path)
 	}
 
-	zipReadCloser, err := zf.Open()
+	rc, err := zf.Open()
 	if err != nil {
 		return nil, xerrors.Errorf("failed to extract path %q from archive", path)
 	}
-	defer zipReadCloser.Close()
+	defer rc.Close()
 
 	var b bytes.Buffer
 	bw := bufio.NewWriter(&b)
-	if _, err := io.Copy(bw, zipReadCloser); err != nil {
+	if _, err := io.Copy(bw, rc); err != nil {
 		return nil, xerrors.Errorf("failed to copy path %q to from archive", path)
 	}
 	return b.Bytes(), nil
 }
 
 func extractFromTGZArchive(path string, archive []byte) ([]byte, error) {
-	return nil, nil
+	zr, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		return nil, xerrors.Errorf("failed to gunzip archive")
+	}
+
+	tr := tar.NewReader(zr)
+
+	var b bytes.Buffer
+	bw := bufio.NewWriter(&b)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, xerrors.Errorf("failed to read tar archive: %w", err)
+		}
+		fi := hdr.FileInfo()
+		if fi.Name() == path && fi.Mode().IsRegular() {
+			io.Copy(bw, tr)
+			break
+		}
+
+	}
+
+	return b.Bytes(), nil
 }
