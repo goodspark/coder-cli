@@ -8,12 +8,11 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
-	"os"
-	"os/exec"
 	"path"
 	"runtime"
 	"time"
 
+	"cdr.dev/coder-cli/internal/coderutil"
 	"cdr.dev/coder-cli/pkg/clog"
 	"golang.org/x/xerrors"
 
@@ -49,7 +48,7 @@ func updateCmd() *cobra.Command {
 		Short: "Update coder binary",
 		Long:  "Update coder to the latest version, or to the correct version matching current login.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return doUpdate(cmd.Context(), force, versionArg)
+			return doUpdate(cmd.Context(), force, versionArg, coderutil.RealOS())
 		},
 	}
 
@@ -59,7 +58,7 @@ func updateCmd() *cobra.Command {
 	return cmd
 }
 
-func doUpdate(ctx context.Context, force bool, versionArg string) error {
+func doUpdate(ctx context.Context, force bool, versionArg string, os coderutil.OSer) error {
 	currentBinaryPath, err := os.Executable()
 	if err != nil {
 		return clog.Fatal("preflight: failed to get path of current binary", clog.Causef("%s", err))
@@ -74,8 +73,7 @@ func doUpdate(ctx context.Context, force bool, versionArg string) error {
 		return clog.Fatal("preflight: missing write permission on current binary")
 	}
 
-	brewPrefixCmd := exec.Command("brew", "--prefix")
-	brewPrefixCmdOutput, err := brewPrefixCmd.CombinedOutput()
+	brewPrefixCmdOutput, err := os.ExecCommand("brew", "--prefix")
 	if err != nil {
 		clog.LogWarn("brew --prefix returned error", clog.Causef(err.Error()))
 	} else {
