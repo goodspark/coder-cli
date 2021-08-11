@@ -198,7 +198,7 @@ func doUpdate(ctx context.Context, force bool, versionArg string) error {
 		return err
 	}
 
-	if err = os.Rename(updatedBinPath, os.Args[0]); err != nil {
+	if err = os.Rename(updatedBinPath, currentBinaryPath); err != nil {
 		return err
 	}
 
