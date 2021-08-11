@@ -1,18 +1,16 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
-	"testing/fstest"
 
-	"cdr.dev/coder-cli/internal/coderutil"
 	"cdr.dev/slog/sloggers/slogtest/assert"
+	"github.com/blang/vfs/memfs"
+	"golang.org/x/xerrors"
 )
 
 func Test_updater_run_noop(t *testing.T) {
@@ -21,66 +19,37 @@ func Test_updater_run_noop(t *testing.T) {
 	fakeCoderClient.APIVersionF = func(c context.Context) (string, error) {
 		return fakeVersion, nil
 	}
-	fakeHTTPClient := newFakeGetter("", 200, nil)
-	fakeOS := newFakeOS()
 	ctx := context.Background()
 	u := &updater{
-		httpClient:  fakeHTTPClient,
-		coderClient: fakeCoderClient,
-		os:          fakeOS,
+		httpClient:     newFakeGetter("", 200, nil),
+		coderClient:    fakeCoderClient,
+		fs:             memfs.Create(),
+		confirm:        fakeConfirmYes,
+		tempdir:        "/tmp",
+		executablePath: "/home/coder/bin/coder",
 	}
 
 	err := u.Run(ctx, true, fakeVersion)
 	assert.Success(t, "", err)
 }
 
-type fakeOS struct {
-	fs fstest.MapFS
-}
-
-
-
-func newFakeOS() *coderutil.OS {
-	return &coderutil.OS{
-		CreateF: func(_ string) (io.ReadWriteCloser, error) {
-			return &MemReadAtWriteCloser{}, nil
-		},
-		ExecCommandF: func(_ string, _ ...string) ([]byte, error) {
-			return []byte{}, nil
-		},
-		ExecutableF: func() (string, error) {
-			return "", nil
-		},
-		ModeF: func(s string) (fs.FileMode, error) {
-			return fs.FileMode(0644), nil
-		},
-		RemoveAllF: func(s string) error {
-			return nil
-		},
-		TempDirF: func(s1, s2 string) (string, error) {
-			return "", nil
-		},
-	}
-}
-
 func newFakeGetter(body string, code int, err error) getter {
-	resp := &http.Response{
-		Body:       io.NopCloser(strings.NewReader(body)),
-		StatusCode: code,
-	}
 	return &fakeGetter{
-		GetF: func(_ string) (*http.Response, error) {
-			return resp, err
+		resp: &http.Response{
+			Body:       io.NopCloser(strings.NewReader(body)),
+			StatusCode: code,
 		},
+		err: err,
 	}
 }
 
 type fakeGetter struct {
-	GetF func(url string) (*http.Response, error)
+	resp *http.Response
+	err  error
 }
 
 func (f *fakeGetter) Get(url string) (*http.Response, error) {
-	return f.GetF(url)
+	return f.resp, f.err
 }
 
 type fakeUpdaterClient struct {
@@ -96,22 +65,14 @@ func (f *fakeUpdaterClient) BaseURL() url.URL {
 	return f.BaseURLF()
 }
 
-type MemReadAtWriteCloser struct {
-	B *bytes.Buffer
+func fakeConfirmYes(_ string) (string, error) {
+	return "y", nil
 }
 
-func (m *MemReadAtWriteCloser) Read(p []byte) (int, error) {
-	return m.B.Read(p)
+func fakeConfirmNo(_ string) (string, error) {
+	return "n", nil
 }
 
-func (m *MemReadAtWriteCloser) ReadAt(p []byte, off int64) (n int, err error) {
-	return bytes.NewReader(m.B.Bytes()).ReadAt(p, off)
-}
-
-func (m *MemReadAtWriteCloser) Write(p []byte) (int, error) {
-	return m.B.Write(p)
-}
-
-func (m *MemReadAtWriteCloser) Close() error {
-	return nil
+func fakeConfirmError(_ string) (string, error) {
+	return "", xerrors.New("oops")
 }
