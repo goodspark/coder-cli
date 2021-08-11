@@ -8,8 +8,8 @@ import (
 
 // OSer wraps methods in package "os" and friends to allow for ease of testing
 type OSer interface {
-	// Create does the same thing as os.Create
-	Create(path string) (ReadWriteCloserAt, error)
+	// OpenFile does the same thing as os.OpenFile
+	OpenFile(name string, flag int, perm fs.FileMode) (ReadWriteCloserAt, error)
 	// Executable does the same thing as os.Executable
 	Executable() (string, error)
 	// Stat does the same thing as os.Stat()
@@ -30,13 +30,12 @@ func NewDefaultOS() *DefaultOS {
 	return &DefaultOS{}
 }
 
-func (d *DefaultOS) Create(name string) (ReadWriteCloserAt, error) {
-	// TODO: use fs.Create when it becomes available (hopefully)
-	return os.Create(name)
-}
-
 func (d *DefaultOS) Executable() (string, error) {
 	return os.Executable()
+}
+
+func (d *DefaultOS) OpenFile(name string, flag int, perm fs.FileMode) (ReadWriteCloserAt, error) {
+	return os.OpenFile(name, flag, perm)
 }
 
 func (d *DefaultOS) Stat(name string) (fs.FileInfo, error) {
